@@ -1,0 +1,95 @@
+name: CCTV Live Source Grabber
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  grab:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Playwright
+        run: |
+          pip install playwright
+          playwright install chromium
+          playwright install-deps chromium
+
+      - name: Grab streams
+        run: |
+          cat > grab.py << 'EOF'
+          from playwright.sync_api import sync_playwright
+          import time
+
+          CHANNELS = {
+              "CCTV-1":  "https://m-live.cctvnews.cctv.com/live/landscape.html?liveRoomNumber=11200132825562653886",
+              "CCTV-2":  "https://m-live.cctvnews.cctv.com/live/landscape.html?liveRoomNumber=12030532124776958103",
+              "CCTV-4":  "https://m-live.cctvnews.cctv.com/live/landscape.html?liveRoomNumber=10620168294224708952",
+              "CCTV-7":  "https://m-live.cctvnews.cctv.com/live/landscape.html?liveRoomNumber=8516529981177953694",
+              "CCTV-9":  "https://m-live.cctvnews.cctv.com/live/landscape.html?liveRoomNumber=7252237247689203957",
+              "CCTV-10": "https://m-live.cctvnews.cctv.com/live/landscape.html?liveRoomNumber=14589146016461298119",
+              "CCTV-12": "https://m-live.cctvnews.cctv.com/live/landscape.html?liveRoomNumber=13180385922471124325",
+              "CCTV-13": "https://m-live.cctvnews.cctv.com/live/landscape.html?liveRoomNumber=16265686808730585228",
+              "CCTV-17": "https://m-live.cctvnews.cctv.com/live/landscape.html?liveRoomNumber=4496917190172866934",
+              "CCTV-4K": "https://m-live.cctvnews.cctv.com/live/landscape.html?liveRoomNumber=2127841942201075403",
+          }
+
+          def grab(name, url):
+              result = None
+              with sync_playwright() as p:
+                  browser = p.chromium.launch(headless=True)
+                  page = browser.new_context(
+                      user_agent="Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 Chrome/115.0.0.0 Mobile Safari/537.36",
+                      viewport={"width": 360, "height": 640},
+                      is_mobile=True
+                  ).new_page()
+
+                  def on_request(req):
+                      nonlocal result
+                      if not result and ".m3u8" in req.url:
+                          result = req.url
+
+                  page.on("request", on_request)
+
+                  try:
+                      page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                      page.evaluate("document.querySelector('video')?.play()")
+                      for _ in range(30):
+                          if result:
+                              break
+                          time.sleep(1)
+                  except Exception:
+                      pass
+                  browser.close()
+              return name, result
+
+          results = [grab(n, u) for n, u in CHANNELS.items()]
+
+          with open("cctv.m3u", "w", encoding="utf-8") as f:
+              f.write("#EXTM3U\n")
+              for name, url in results:
+                  if url:
+                      f.write(f'#EXTINF:-1 tvg-name="{name}" group-title="CCTV",{name}\n{url}\n')
+
+          ok = sum(1 for _, u in results if u)
+          print(f"成功: {ok}/{len(results)}")
+          EOF
+          python grab.py
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add cctv.m3u
+          git diff --cached --quiet || (git commit -m "update: $(date -u +%Y-%m-%d_%H:%M UTC)" && git push)
